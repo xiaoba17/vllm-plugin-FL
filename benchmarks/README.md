@@ -5,6 +5,8 @@ This directory provides two workflows:
 - `benchmark_throughput_autotune.py`: auto-tune FlagGems operator selection by throughput.
 - `benchmark_iluvatar_topp.py`: validate and microbenchmark Top-p filtering on
   Iluvatar GPUs.
+- `benchmark_iluvatar_topp_sweep.py`: sweep launch-only parameters of the
+  existing vLLM Top-p Triton kernel without changing its algorithm.
 
 ---
 
@@ -99,11 +101,32 @@ python benchmarks/benchmark_iluvatar_topp.py \
   --output results/iluvatar-topp-baseline.json
 ```
 
-The script compares the retained Top-p support with vLLM's ascending-sort
-PyTorch reference and returns a non-zero status on a mismatch. It then reports
-median and tail latency for each batch size and synthetic logit distribution.
-Use `--logits-file` to add a saved real `[batch, vocab]` logits tensor.
+The script compares the retained Top-p support and probability mass with
+vLLM's ascending-sort PyTorch reference. The existing pivot kernel is
+approximate, so differences are reported rather than hidden; use
+`--require-exact-support` when testing an implementation that promises exact
+support. The script also reports median and tail latency for each batch size
+and synthetic logit distribution. Use `--logits-file` to add a saved real
+`[batch, vocab]` logits tensor.
 
 This is a diagnostic microbenchmark. It does not replace the official 4K/16K
 throughput runs or the Math-500 accuracy evaluation, and it must not be used to
 change the official sampling parameters.
+
+### Iluvatar launch-parameter sweep
+
+Use a saved real-logits tensor to compare block, truncation, warp, and grid
+choices while reusing vLLM's kernel body verbatim:
+
+```bash
+python benchmarks/benchmark_iluvatar_topp_sweep.py \
+  --logits-file results/iluvatar-topp-real-b64.pt \
+  --block-sizes 2048,4096,8192 \
+  --block-size-truncs 1024,2048,4096 \
+  --num-warps 4 \
+  --program-counts 16 \
+  --output results/iluvatar-topp-sweep.json
+```
+
+Treat this as a search tool only. Re-run `benchmark_iluvatar_topp.py` with
+`--implementation actual` after applying a candidate to the serving backend.

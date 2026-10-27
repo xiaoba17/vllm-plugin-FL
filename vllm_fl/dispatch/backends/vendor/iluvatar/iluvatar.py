@@ -232,7 +232,202 @@ def patch_sampler_compile_for_iluvatar() -> None:
     except Exception as e:
         logger.warning('patch_sampler_compile_for_iluvatar (logprobs): %s', e)
 
+
+def patch_topp_launch_for_iluvatar() -> None:
+    """Tune standalone Top-p launch geometry for BI-V150.
+
+    The upstream kernel limits its grid to the device compute-unit count. On a
+    16-CU BI-V150 this makes a batch of 64 execute four rows serially in each
+    program. The kernel has no cross-row communication, so launching up to 64
+    programs exposes row-level parallelism without changing the algorithm.
+
+    This patch deliberately covers only the competition's standalone Top-p
+    path when a batch is larger than the device's 16-CU grid. Top-k, combined
+    Top-k/Top-p, batches up to 16, and unexpected layouts or dtypes retain the
+    upstream implementation.
+    """
+    try:
+        import importlib
+
+        _tts = importlib.import_module("vllm.v1.sample.ops.topk_topp_sampler")
+        _ttt = importlib.import_module("vllm.v1.sample.ops.topk_topp_triton")
+        if getattr(_ttt, "_iluvatar_launch_patched", False):
+            return
+
+        original = _ttt.apply_top_k_top_p_triton
+        buffers: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
+
+        def apply_top_k_top_p_triton_iluvatar(
+            logits: torch.Tensor,
+            k: torch.Tensor | None,
+            p: torch.Tensor | None,
+            mask_value: float = float("-inf"),
+        ) -> torch.Tensor:
+            if (
+                k is not None
+                or p is None
+                or logits.ndim != 2
+                or logits.dtype != torch.float32
+                or logits.shape[0] <= 16
+            ):
+                return original(logits, k, p, mask_value)
+
+            batch_size, vocab_size = logits.shape
+            if logits.stride(1) != 1:
+                logits = logits.contiguous()
+            if p.ndim != 1 or p.shape[0] != batch_size:
+                return original(logits, k, p, mask_value)
+
+            # BI-V150 has 16 CUs. Up to four programs per CU avoids serial row
+            # loops at the competition's batch sizes. Keep every other launch
+            # parameter at its upstream value so per-row reduction order and
+            # Top-p support are unchanged.
+            num_programs = min(batch_size, 64)
+            buffer_key = (logits.device, logits.dtype, vocab_size)
+            buffer = buffers.get(buffer_key)
+            if buffer is None or buffer.shape[0] < num_programs:
+                buffer_rows = min(1 << (num_programs - 1).bit_length(), 64)
+                buffer = logits.new_empty((buffer_rows, vocab_size))
+                buffers[buffer_key] = buffer
+            if buffer.shape[0] > num_programs:
+                buffer = buffer[:num_programs]
+
+            tables = _ttt._TRITON_TABLE_CACHE.get(logits.device)
+            if tables is None:
+                normal_table = logits.new_tensor(_ttt._NORMAL_CDF_TO_SIGMA_TABLE)
+                percentile_table = logits.new_tensor(_ttt._PERCENTILE_TO_STD_TABLE)
+                tables = (normal_table, percentile_table)
+                _ttt._TRITON_TABLE_CACHE[logits.device] = tables
+            normal_table, percentile_table = tables
+
+            _ttt._topk_topp_kernel[(num_programs,)](
+                logits,
+                logits.stride(0),
+                buffer,
+                percentile_table,
+                normal_table,
+                logits,  # Dummy K pointer; TOPK_ENABLED is false.
+                p.to(torch.float32),
+                BATCH_SIZE=batch_size,
+                MASK_VALUE=mask_value,
+                VOCAB_SIZE=vocab_size,
+                BLOCK_SIZE=8192,
+                BLOCK_SIZE_TRUNC=4096,
+                TOPK_ENABLED=False,
+                TOPP_ENABLED=True,
+                num_warps=4,
+            )
+            return logits
+
+        _ttt.apply_top_k_top_p_triton = apply_top_k_top_p_triton_iluvatar
+        _tts.apply_top_k_top_p_triton = apply_top_k_top_p_triton_iluvatar
+        _ttt._iluvatar_launch_patched = True
+        logger.info(
+            "Tuned Iluvatar standalone Top-p grid: programs=min(batch, 64); "
+            "upstream block=8192, trunc=4096, warps=4 preserved"
+        )
+    except Exception as e:
+        logger.warning("patch_topp_launch_for_iluvatar: %s", e)
+
+
+def patch_topp_logits_dump_for_iluvatar() -> None:
+    """Optionally dump the exact logits entering vLLM's Top-p filter.
+
+    This is a diagnostic-only hook. It is inactive unless
+    ``VLLM_FL_ILUVATAR_TOPP_LOGITS_DUMP`` names an output ``.pt`` file. When
+    enabled, the first matching call is copied to CPU before the filter can
+    update logits in-place. ``VLLM_FL_ILUVATAR_TOPP_LOGITS_DUMP_BATCH`` can be
+    set to require a particular batch size (for example, 64).
+
+    Keeping this at the sampler-op boundary captures post-processor logits,
+    i.e. the actual tensor the Top-p kernel sees, without changing model
+    execution or the sampling algorithm.
+    """
+    import os
+
+    output = os.getenv("VLLM_FL_ILUVATAR_TOPP_LOGITS_DUMP")
+    if not output:
+        return
+
+    try:
+        import importlib
+        from pathlib import Path
+        from threading import Lock
+
+        _tts = importlib.import_module("vllm.v1.sample.ops.topk_topp_sampler")
+        if getattr(_tts, "_iluvatar_topp_logits_dump_patched", False):
+            return
+
+        batch_value = os.getenv("VLLM_FL_ILUVATAR_TOPP_LOGITS_DUMP_BATCH")
+        required_batch = int(batch_value) if batch_value else None
+        output_path = Path(output)
+        original = _tts.apply_top_k_top_p
+        lock = Lock()
+        dumped = False
+
+        def _to_cpu(value):
+            if value is None:
+                return None
+            return value.detach().to(device="cpu", copy=True)
+
+        def apply_top_k_top_p_with_dump(logits, k, p):
+            nonlocal dumped
+            should_dump = (
+                not dumped
+                and p is not None
+                and logits.ndim == 2
+                and (required_batch is None or logits.shape[0] == required_batch)
+            )
+            if should_dump:
+                with lock:
+                    if not dumped:
+                        # Mark before synchronizing/copying so an exception cannot
+                        # repeatedly perturb subsequent decoding steps.
+                        dumped = True
+                        try:
+                            output_path.parent.mkdir(parents=True, exist_ok=True)
+                            temporary_path = output_path.with_suffix(
+                                output_path.suffix + ".tmp"
+                            )
+                            torch.save(
+                                {
+                                    "logits": _to_cpu(logits),
+                                    "k": _to_cpu(k),
+                                    "p": _to_cpu(p),
+                                    "shape": tuple(logits.shape),
+                                    "dtype": str(logits.dtype),
+                                    "device": str(logits.device),
+                                },
+                                temporary_path,
+                            )
+                            os.replace(temporary_path, output_path)
+                            logger.info(
+                                "Dumped Iluvatar Top-p input logits with shape %s to %s",
+                                tuple(logits.shape),
+                                output_path,
+                            )
+                        except Exception:
+                            # Diagnostics must never break or change sampling.
+                            logger.exception(
+                                "Failed to dump Iluvatar Top-p logits to %s",
+                                output_path,
+                            )
+            return original(logits, k, p)
+
+        _tts.apply_top_k_top_p = apply_top_k_top_p_with_dump
+        _tts._iluvatar_topp_logits_dump_patched = True
+        logger.info(
+            "Enabled one-shot Iluvatar Top-p logits dump to %s (batch=%s)",
+            output_path,
+            required_batch if required_batch is not None else "any",
+        )
+    except Exception as e:
+        logger.warning("patch_topp_logits_dump_for_iluvatar: %s", e)
+
+
 patch_sampler_compile_for_iluvatar()
+patch_topp_launch_for_iluvatar()
+patch_topp_logits_dump_for_iluvatar()
 
 
 def patch_torch_inductor_for_iluvatar() -> None:
