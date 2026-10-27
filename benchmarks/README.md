@@ -3,8 +3,6 @@
 This directory provides two workflows:
 - `benchmark_throughput_flagos.py`: throughput benchmarking for a served model.
 - `benchmark_throughput_autotune.py`: auto-tune FlagGems operator selection by throughput.
-- `benchmark_iluvatar_topp.py`: validate and microbenchmark Top-p filtering on
-  Iluvatar GPUs.
 
 ---
 
@@ -83,27 +81,3 @@ Each run creates a directory under `autotune_logs/autotune_xxx` with:
 - Round 1 runs baseline throughput without FlagGems.
 - Round 2 benchmarks each op in isolation (whitelist).
 - Round 3 validates the best-performing set.
-
----
-
-## benchmark_iluvatar_topp.py
-
-Run this benchmark inside the Iluvatar development environment before and
-after changing the Top-p kernel. The competition model uses a vocabulary size
-of 130560 and `top_p=0.95`, which are the script defaults.
-
-```bash
-python benchmarks/benchmark_iluvatar_topp.py \
-  --batch-sizes 1,8,16,32,64 \
-  --implementation triton \
-  --output results/iluvatar-topp-baseline.json
-```
-
-The script compares the retained Top-p support with vLLM's ascending-sort
-PyTorch reference and returns a non-zero status on a mismatch. It then reports
-median and tail latency for each batch size and synthetic logit distribution.
-Use `--logits-file` to add a saved real `[batch, vocab]` logits tensor.
-
-This is a diagnostic microbenchmark. It does not replace the official 4K/16K
-throughput runs or the Math-500 accuracy evaluation, and it must not be used to
-change the official sampling parameters.
