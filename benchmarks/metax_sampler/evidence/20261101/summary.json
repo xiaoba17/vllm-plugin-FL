@@ -1,0 +1,71 @@
+{
+  "date": "2026-11-01",
+  "validation_status": "Pre-commit hardware validation; commit-pinned formal retest pending",
+  "plugin_base_commit": "13eb9be69ecc5b5ca4f79c44e9ee40081eaa1bf0",
+  "flaggems_commit": "a7620cc191a0b42e040194622c5758b22a7a25dc",
+  "feature_branch": "feat/metax-topp-radix-sort",
+  "personal_branch": "opt/gongjin-metax",
+  "production_sha256": {
+    "radix_sort.py": "17cefb665c2bdbed21dc3e8ff9862dd4cc40a0d95f9c3df5200b816fd71f197c",
+    "topk_topp_sampler.py": "fe3b0f5c0ba00bed21aa78835d55817018ea5ea99047e12187b13a9f60f8ca94"
+  },
+  "default_enabled": false,
+  "semantic_cases": 35,
+  "semantic_mismatches": 0,
+  "tokens_and_rng_equal_in_all_tested_cases": true,
+  "4k": {
+    "runs_each": 4,
+    "scored_rounds": [
+      2,
+      3,
+      4
+    ],
+    "requests_per_run": 256,
+    "all_requests_successful": true,
+    "baseline_total_tps": 4582.796666666667,
+    "candidate_total_tps": 7567.623333333333,
+    "candidate_ttft_ms": 3201.54,
+    "throughput_gain_percent": 65.13111717081053,
+    "local_recomputed_gates_passed": true,
+    "baseline_reused_from_earlier_v1_run": true
+  },
+  "16k": {
+    "runs_each": 4,
+    "scored_rounds": [
+      2,
+      3,
+      4
+    ],
+    "requests_per_run": 128,
+    "all_requests_successful": true,
+    "baseline_total_tps": 7014.6466666666665,
+    "candidate_total_tps": 8219.49,
+    "candidate_ttft_ms": 26304.11666666667,
+    "throughput_gain_percent": 17.176108656458823,
+    "local_recomputed_gates_passed": true
+  },
+  "math500": {
+    "subset": "Level 3",
+    "predictions": 105,
+    "reviews": 105,
+    "unique_prediction_indices": 105,
+    "unique_review_indices": 105,
+    "index_sets_identical": true,
+    "successful_reviews": 105,
+    "prediction_errors": 0,
+    "correct": 102,
+    "report_accuracy": 0.9714,
+    "minimum_accuracy": 0.95,
+    "stop_reason_counts": {
+      "stop": 104,
+      "max_tokens": 1
+    },
+    "passed": true
+  },
+  "limitations": [
+    "4K TTFT is only about 29.89 ms below the official ceiling.",
+    "4K baseline was measured earlier and showed variability; no reverse-order interleaved A/B was performed.",
+    "The observed end-to-end gain must not be attributed entirely to the libentry revision.",
+    "Final three-person integration and submission-environment regression remain separate tasks."
+  ]
+}
