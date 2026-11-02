@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batches", default="1,8,16,32,64")
     parser.add_argument("--repeats", type=int, default=10)
+    parser.add_argument("--fallback-only", action="store_true")
     args = parser.parse_args()
     flag_gems.enable(unused=["masked_fill", "masked_fill_"])
     os.environ["VLLM_FL_METAX_RADIX_SORT"] = "1"
@@ -36,7 +37,7 @@ def main():
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(20261101)
-    for batch in map(int, args.batches.split(",")):
+    for batch in [] if args.fallback_only else map(int, args.batches.split(",")):
         for name in (
             "normal",
             "bf16",
@@ -111,12 +112,22 @@ def main():
         ("topk", x, k, p),
         ("noop", x, None, None),
         ("half", x.half(), None, p),
-        ("strided", x[:, ::2], None, p),
+        ("unsupported_vocab", x[:, ::2], None, p),
     ):
         expected = reference(value.clone(), topk, topp)
         actual = candidate(value.clone(), topk, topp)
         assert torch.equal(expected, actual), name
         report["fallbacks"].append({"case": name, "equal": True})
+    # clone() makes the previous sliced input dense and halves its vocabulary.
+    # Keep full vocabulary with independent non-contiguous backing tensors.
+    backing = torch.randn((8, 261120), device="cuda")
+    expected_input = backing.clone()[:, ::2]
+    actual_input = backing.clone()[:, ::2]
+    assert actual_input.shape == x.shape and not actual_input.is_contiguous()
+    expected = reference(expected_input, None, p)
+    actual = candidate(actual_input, None, p)
+    assert torch.equal(expected, actual), "full_width_noncontiguous"
+    report["fallbacks"].append({"case": "full_width_noncontiguous", "equal": True})
     saved_sort = getattr(flag_gems, "radix_sort_rows", None)
     if saved_sort is not None:
         delattr(flag_gems, "radix_sort_rows")
