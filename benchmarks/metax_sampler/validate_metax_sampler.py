@@ -117,6 +117,18 @@ def main():
         actual = candidate(value.clone(), topk, topp)
         assert torch.equal(expected, actual), name
         report["fallbacks"].append({"case": name, "equal": True})
+    saved_sort = getattr(flag_gems, "radix_sort_rows", None)
+    if saved_sort is not None:
+        delattr(flag_gems, "radix_sort_rows")
+        try:
+            expected = reference(x.clone(), None, p)
+            actual = candidate(x.clone(), None, p)
+            assert torch.equal(expected, actual), "missing_flaggems_entrypoint"
+            report["fallbacks"].append(
+                {"case": "missing_flaggems_entrypoint", "equal": True}
+            )
+        finally:
+            flag_gems.radix_sort_rows = saved_sort
     report["complete"] = True
     args.output.write_text(json.dumps(report, indent=2))
     print("VALIDATION_COMPLETE", flush=True)

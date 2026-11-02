@@ -35,7 +35,11 @@ def _apply_top_k_top_p_no_triton(
         # Equal-value index order matches FlagGems' stable radix sorter, not
         # necessarily PyTorch's native sort. Respect alternate registrations.
         registrar = getattr(flag_gems, "current_work_registrar", None)
-        if registrar is not None and "sort" in registrar.get_all_ops():
+        if (
+            registrar is not None
+            and "sort" in registrar.get_all_ops()
+            and callable(getattr(flag_gems, "radix_sort_rows", None))
+        ):
             from ..impl.radix_sort import radix_top_p
 
             logger.info_once("MetaX tiled radix Top-p enabled; original sampling parameters preserved")
